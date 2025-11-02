@@ -5,9 +5,18 @@
 int main() {
     stdio_init_all();
 
+    // LED pins
     const uint LED_PIN1 = 20;
     const uint LED_PIN2 = 21;
     const uint LED_PIN3 = 22;
+
+    // Buttons:
+    // SW0 button will decrease brightness
+    // SW1 is ON/OFF button (middle)
+    // SW2 button will increase brightness
+    const uint SW0 = 7;
+    const uint SW1 = 8;
+    const uint SW2 = 9;
 
     // Set pins to PWM function
     gpio_set_function(LED_PIN1, GPIO_FUNC_PWM);
@@ -25,11 +34,12 @@ int main() {
     uint slice_num3 = pwm_gpio_to_slice_num(LED_PIN3);
     uint channel3 = pwm_gpio_to_channel(LED_PIN3);
 
+    // Print the LED pins GPIO, slice and channel
     printf("LED_PIN1: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN1, slice_num1, channel1);
     printf("LED_PIN2: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN2, slice_num2, channel2);
     printf("LED_PIN3: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN3, slice_num3, channel3);
 
-    // Stop PWM initially
+    // Stop PWM
     pwm_set_enabled(slice_num1, false);
     pwm_set_enabled(slice_num2, false);
     pwm_set_enabled(slice_num3, false);
@@ -44,25 +54,51 @@ int main() {
     pwm_init(slice_num2, &config, false);
     pwm_init(slice_num3, &config, false);
 
+    uint brightness = 500;
+    bool LEDS_ON = true;
+    bool previous_sw1 = false;
+
     // Set brightness (duty cycle)
-    pwm_set_chan_level(slice_num1, channel1, 500);  // ~50%
-    pwm_set_chan_level(slice_num2, channel2, 750);  // ~75%
-    pwm_set_chan_level(slice_num3, channel3, 250);  // ~25%
+    pwm_set_chan_level(slice_num1, channel1, brightness);
+    pwm_set_chan_level(slice_num2, channel2, brightness);
+    pwm_set_chan_level(slice_num3, channel3, brightness);
     printf("PWM channel levels (duty cycles) set.\n");
 
-    // ✅ Start PWM output
+    // Start PWM output
     pwm_set_enabled(slice_num1, true);
     pwm_set_enabled(slice_num2, true);
     pwm_set_enabled(slice_num3, true);
     printf("PWM started for all LED slices.\n");
 
-    // --- Example: adjust duty cycle while running ---
-    // Increase LED1 to 80%, LED2 to 50%, LED3 to 100%
-    pwm_set_chan_level(slice_num1, channel1, 800);
-    pwm_set_chan_level(slice_num2, channel2, 500);
-    pwm_set_chan_level(slice_num3, channel3, 999);
+    // Setup buttons
+    gpio_init(SW0); gpio_set_dir(SW0, GPIO_IN); gpio_pull_up(SW0);
+    gpio_init(SW1); gpio_set_dir(SW1, GPIO_IN); gpio_pull_up(SW1);
+    gpio_init(SW2); gpio_set_dir(SW2, GPIO_IN); gpio_pull_up(SW2);
 
     while (1) {
-        // Keep running forever
+        bool sw0 = !gpio_get(SW0); // decrease
+        bool sw1 = !gpio_get(SW1); // toggle
+        bool sw2 = !gpio_get(SW2); // increase
+
+        //SW1 toggle
+        if (sw1 && !previous_sw1) {
+            LEDS_ON = !LEDS_ON;
+            if (!LEDS_ON) brightness = 0;
+            else if (brightness == 0) brightness = 500; // restore to 50% if off
+        }
+        previous_sw1 = sw1;
+
+        //Adjust brightness only if LEDs ON
+        if (LEDS_ON) {
+            if (sw0 && brightness > 0) brightness--;
+            if (sw2 && brightness < 999) brightness++;
+        }
+
+        //Update all LEDs
+        pwm_set_chan_level(slice_num1, channel1, brightness);
+        pwm_set_chan_level(slice_num2, channel2, brightness);
+        pwm_set_chan_level(slice_num3, channel3, brightness);
+
+        sleep_ms(5);// smooth dimming
     }
 }
