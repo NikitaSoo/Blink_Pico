@@ -2,32 +2,33 @@
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
 
-
 #define MAX_BRIGHTNESS 1000
 #define MIN_BRIGHTNESS 0
 
+#define ROT_A 10
+#define ROT_B 11
+#define ROT_SW 12
+
+volatile bool rotated = false;
+volatile int direction = 0; // +1 or -1
+
+// --- Interrupt for the rotary encoder ---
+void gpio_handler(uint gpio, uint32_t event_mask) {
+    bool b_state = gpio_get(ROT_B);
+    if (b_state)
+        direction = 1;   // Clockwise
+    else
+        direction = -1;  // Counter-clockwise
+    rotated = true;
+}
 
 int main() {
-    //function to use printf in code :)
     stdio_init_all();
 
-    //LED pins
+    // LED pins
     const uint LED_PIN1 = 20;
     const uint LED_PIN2 = 21;
     const uint LED_PIN3 = 22;
-
-    //Buttons:
-    //SW0 button will decrease brightness
-    //SW1 is ON/OFF button (middle)
-    //SW2 button will increase brightness
-    const uint SW0 = 7;
-    const uint SW1 = 8;
-    const uint SW2 = 9;
-
-
-    /*Kaikki mitä tossa alhaalla on tehty ohjeiden mukaisesti, jotka löytyivät
-    02_PWM.pdf main looppiin asti -->
-     */
 
     //Set pins to PWM function
     gpio_set_function(LED_PIN1, GPIO_FUNC_PWM);
@@ -36,141 +37,99 @@ int main() {
 
     //Get PWM slices and channels
     uint slice_num1 = pwm_gpio_to_slice_num(LED_PIN1);
-    uint channel1 = pwm_gpio_to_channel(LED_PIN1);
+    uint channel1   = pwm_gpio_to_channel(LED_PIN1);
 
     uint slice_num2 = pwm_gpio_to_slice_num(LED_PIN2);
-    uint channel2 = pwm_gpio_to_channel(LED_PIN2);
+    uint channel2   = pwm_gpio_to_channel(LED_PIN2);
 
     uint slice_num3 = pwm_gpio_to_slice_num(LED_PIN3);
-    uint channel3 = pwm_gpio_to_channel(LED_PIN3);
+    uint channel3   = pwm_gpio_to_channel(LED_PIN3);
 
-    //Print the LED pins GPIO
-    printf("LED_PIN1: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN1, slice_num1, channel1);
-    printf("LED_PIN2: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN2, slice_num2, channel2);
-    printf("LED_PIN3: GPIO: %u, PWM slice: %u, channel: %u\n", LED_PIN3, slice_num3, channel3);
-
-    //Stop PWM
-    pwm_set_enabled(slice_num1, false);
-    pwm_set_enabled(slice_num2, false);
-    pwm_set_enabled(slice_num3, false);
-
-    //Just to get deafult config
     pwm_config config = pwm_get_default_config();
-
-    /*Divider is configured to output 1 MHz (the RP2040 runs on the main clock 125MHz)
-     *Thats way too fast so we divide that clock by 125 (125 MHz / 125 = 1MHz)
-    */
-    pwm_config_set_clkdiv_int(&config, 125);
-
-    //1kHz PWM output (so they counter goes from 0-999) total steps per cycle
-    pwm_config_set_wrap(&config, 999);
-
-    //Initialize PWM with this config (dont start yet)
+    pwm_config_set_clkdiv_int(&config, 125);   // 1 MHz base clock
+    pwm_config_set_wrap(&config, 999);         // 1 kHz PWM
     pwm_init(slice_num1, &config, false);
     pwm_init(slice_num2, &config, false);
     pwm_init(slice_num3, &config, false);
 
+    uint brightness = 500;       // current level
+    uint last_brightness = 500;  // remembered level
+    bool leds_on = true;
+    bool prev_button = false;
 
-    //Set brightness
-    uint brightness = 500; //asetetaan alkuarvo kirkkaudelle 50%
-    uint last_brightness = 500; //!!
-
-    bool LEDS_ON = true; //muuttuja joka pitää huolen ovatko LEDit päällä
-    bool previous_sw1 = false; //tämä tallentaa napin aiemman tilan
-
-    //Set brightness (duty cycle)
     pwm_set_chan_level(slice_num1, channel1, brightness);
     pwm_set_chan_level(slice_num2, channel2, brightness);
     pwm_set_chan_level(slice_num3, channel3, brightness);
-
-    //Start PWM output
     pwm_set_enabled(slice_num1, true);
     pwm_set_enabled(slice_num2, true);
     pwm_set_enabled(slice_num3, true);
 
-    //Setup buttons (every button is made as input
-    gpio_init(SW0); gpio_set_dir(SW0, GPIO_IN); gpio_pull_up(SW0);
-    gpio_init(SW1); gpio_set_dir(SW1, GPIO_IN); gpio_pull_up(SW1);
-    gpio_init(SW2); gpio_set_dir(SW2, GPIO_IN); gpio_pull_up(SW2);
+    // --- Rotary encoder setup ---
+    gpio_init(ROT_A);
+    gpio_set_dir(ROT_A, GPIO_IN);
+    gpio_init(ROT_B);
+    gpio_set_dir(ROT_B, GPIO_IN);
+    gpio_init(ROT_SW);
+    gpio_set_dir(ROT_SW, GPIO_IN);
+    gpio_pull_up(ROT_SW);
 
+    gpio_set_irq_enabled_with_callback(ROT_A, GPIO_IRQ_EDGE_RISE, true, &gpio_handler);
 
-    //Main loop
+    printf("Rotary encoder interrupt setup done.\n");
 
-    //"true" when button is pressed "false" when released
     while (1) {
-        bool sw0 = !gpio_get(SW0); //decrease
-        bool sw1 = !gpio_get(SW1); //toggle
-        bool sw2 = !gpio_get(SW2); //increase
+        // --- Handle rotation ---
+        if (rotated) {
+            rotated = false;
 
-        //SW1 toggle
-        if (sw1 && !previous_sw1) {
-            if (LEDS_ON) {
+            if (leds_on) {
+                if (direction > 0 && brightness < MAX_BRIGHTNESS - 10)
+                    brightness += 10;
+                else if (direction < 0 && brightness > MIN_BRIGHTNESS + 10)
+                    brightness -= 10;
+                else if (direction < 0 && brightness <= 10)
+                    brightness = 0; // full off at bottom
 
+                if (brightness > 0)
+                    last_brightness = brightness; // remember level
+
+                pwm_set_chan_level(slice_num1, channel1, brightness);
+                pwm_set_chan_level(slice_num2, channel2, brightness);
+                pwm_set_chan_level(slice_num3, channel3, brightness);
+                printf("Brightness: %u\n", brightness);
+            }
+        }
+
+        // --- Handle push button (toggle on/off) ---
+        bool button_pressed = !gpio_get(ROT_SW);
+
+        if (button_pressed && !prev_button) {
+            if (leds_on) {
+                // if LEDs are ON and at 0 %, set 50 % immediately
                 if (brightness == 0) {
-                    //If already fully dimmed, go straight to 50% instead of off
                     brightness = 500;
                     last_brightness = 500;
-                }
-
-                else {
-                    //Turn LEDs OFF and remember last brightness
-                    LEDS_ON = false;
-
-                    if (brightness > 0) {
-                        last_brightness = brightness;
-                    }
-                    else {
-                        last_brightness = 0;
-                    }
-
-                    brightness = 0;
-                }
-            }
-
-            else {
-                //Turn LEDs ON
-                LEDS_ON = true;
-
-                if (last_brightness > 0) {
-                    brightness = last_brightness;
-                }
-                else {
-                    brightness = 500;
-                }
-            }
-        }
-        previous_sw1 = sw1;
-
-        //We adjust brightness only if LEDs are ON
-        if (LEDS_ON) {
-
-            //Decrease brightness
-            if (sw0 && brightness > 0) {
-                brightness--;
-
-                if (brightness == 0) {
-                    last_brightness = 0;
-                    LEDS_ON = false;
-                }
-            }
-
-            //Increase brightness
-            if (sw2 && brightness < MAX_BRIGHTNESS) {
-                brightness++;
-
-                if (brightness > 0) {
+                } else {
+                    // turn off, but remember brightness
                     last_brightness = brightness;
+                    brightness = 0;
+                    leds_on = false;
                 }
+            } else {
+                // turn ON → restore remembered brightness
+                leds_on = true;
+                if (last_brightness == 0)
+                    brightness = 500; // default 50 %
+                else
+                    brightness = last_brightness;
             }
+
+            pwm_set_chan_level(slice_num1, channel1, brightness);
+            pwm_set_chan_level(slice_num2, channel2, brightness);
+            pwm_set_chan_level(slice_num3, channel3, brightness);
         }
 
-        //And then we update all LEDs
-        pwm_set_chan_level(slice_num1, channel1, brightness);
-        pwm_set_chan_level(slice_num2, channel2, brightness);
-        pwm_set_chan_level(slice_num3, channel3, brightness);
-
-        //Use sleep to make dimming smooth (if we dont use sleep then it's not quite a dimming) :)
-        //Without sleep when we press buttons they will just put lowest and highest values
-        sleep_ms(10);
+        prev_button = button_pressed;
+        sleep_ms(5);
     }
 }
