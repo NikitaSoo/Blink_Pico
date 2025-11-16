@@ -1,158 +1,156 @@
-#include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
+#include "hardware/gpio.h"
+#include "pico/util/queue.h"
 
-//Maximi LED valojen kirkkaus ja minimi
+//Maximi kirkkaus:
 #define MAX_BRIGHTNESS 1000
-#define MIN_BRIGHTNESS 0
-
-//Rotary encoder pinnit:
-#define ROT_A 10
-#define ROT_B 11
-#define ROT_SW 12 //kytkin (kun painaa siitä)
 
 //LED pinnit:
 #define LED_PIN1 20
 #define LED_PIN2 21
 #define LED_PIN3 22
 
-
-//Globaalit muuttujat ("volatile" on käytännössä se, että muuttujan arvo voi muuttua)
-volatile bool rotated = false;
-volatile int direction = 0; // +1 tai -1
-
-
+//Rotary encoder pinnit:
+#define ROT_A 10
+#define ROT_B 11
+#define ROT_SW 12
 
 
-/*Funktio suoritetaan aina Encoder havaitsee reunan (nousevan tai laskevan)
-  Funktio ei muuta PWM-arvoa suoraan. Sen sijaan ilmoittaa siitä "Mainin" sisällä */
+//ISR laittaa muistiin käännökset:
+queue_t rot_queue;
 
-static void gpio_handler(uint gpio, uint32_t event_mask) {
-    bool b_state = gpio_get(ROT_B);
-
-    //Myötäpäivää
-    if (b_state)
-        direction = 1;
-
-    //Vastapäivää
-    else
-        direction = -1;
-
-    rotated = true; //ilmoitetaan "mainin" sisällä, että kääntö tapahtui
-}
+void gpio_interrupt(uint gpio, uint32_t events);
 
 int main() {
 
-    //Printf toimii :)
-    stdio_init_all();
+    //"Rotary encoder" asetukset:
+    gpio_init(ROT_A);
+    gpio_set_dir(ROT_A, GPIO_IN);
+    gpio_disable_pulls(ROT_A);
 
-    //LED-pinnit PWM-käyttöön
+    gpio_init(ROT_B);
+    gpio_set_dir(ROT_B, GPIO_IN);
+    gpio_disable_pulls(ROT_B);
+
+
+    //NAPPI:
+    gpio_init(ROT_SW);
+    gpio_set_dir(ROT_SW, GPIO_IN);
+    gpio_pull_up(ROT_SW);
+
+
+    //LED-pinnit PWM-käyttöön:
     gpio_set_function(LED_PIN1, GPIO_FUNC_PWM);
     gpio_set_function(LED_PIN2, GPIO_FUNC_PWM);
     gpio_set_function(LED_PIN3, GPIO_FUNC_PWM);
 
 
-    //"Slices" ja "channels"
-    uint slice_num1 = pwm_gpio_to_slice_num(LED_PIN1);
-    uint channel1 = pwm_gpio_to_channel(LED_PIN1);
-
-    uint slice_num2 = pwm_gpio_to_slice_num(LED_PIN2);
-    uint channel2 = pwm_gpio_to_channel(LED_PIN2);
-
-    uint slice_num3 = pwm_gpio_to_slice_num(LED_PIN3);
-    uint channel3 = pwm_gpio_to_channel(LED_PIN3);
+    //"Slices":
+    uint slice1 = pwm_gpio_to_slice_num(LED_PIN1);
+    uint slice2 = pwm_gpio_to_slice_num(LED_PIN2);
+    uint slice3 = pwm_gpio_to_slice_num(LED_PIN3);
 
 
-    //"Default config"
-    pwm_config config = pwm_get_default_config();
+    //Jaetaan 125 MHz 125:llä, josta tulee = 1 MHz:
+    pwm_set_clkdiv(slice1, 125.0f);
+    pwm_set_clkdiv(slice2, 125.0f);
+    pwm_set_clkdiv(slice3, 125.0f);
 
-    //Jaetaan 125 MHz 125:llä, josta tulee = 1 MHz
-    pwm_config_set_clkdiv_int(&config, 125);
+    //1 kHz (0-999 arvot):
+    pwm_set_wrap(slice1, MAX_BRIGHTNESS - 1);
+    pwm_set_wrap(slice2, MAX_BRIGHTNESS - 1);
+    pwm_set_wrap(slice3, MAX_BRIGHTNESS - 1);
 
-    //1kHz PWM output (so they counter goes from 0-999) total steps per cycle
-    pwm_config_set_wrap(&config, 999);
-
-    //Initialize PWM with this config (dont start yet)
-    pwm_init(slice_num1, &config, false);
-    pwm_init(slice_num2, &config, false);
-    pwm_init(slice_num3, &config, false);
-
-
-    //(Asetetaan alkuarvo kirkkaudelle 50%)
-    uint brightness = 500;
-    bool leds_on = true; //muuttuja joka pitää huolen ovatko LEDit päällä
-    bool prev_button = false; //tämä tallentaa napin aiemman tilan
-
-    //Asetetaan PWM-kanaville alkuarvot
-    pwm_set_chan_level(slice_num1, channel1, brightness);
-    pwm_set_chan_level(slice_num2, channel2, brightness);
-    pwm_set_chan_level(slice_num3, channel3, brightness);
-
-    //Käynnistetään PWM
-    pwm_set_enabled(slice_num1, true);
-    pwm_set_enabled(slice_num2, true);
-    pwm_set_enabled(slice_num3, true);
+    //Käynnistetään PWM:
+    pwm_set_enabled(slice1, true);
+    pwm_set_enabled(slice2, true);
+    pwm_set_enabled(slice3, true);
 
 
+    //Jonon alustus:
+    queue_init(&rot_queue, sizeof(int), 32);
 
-    //"Rotary encoder" asetukset
-    gpio_init(ROT_A);
-    gpio_set_dir(ROT_A, GPIO_IN);
-
-    gpio_init(ROT_B);
-    gpio_set_dir(ROT_B, GPIO_IN);
-
-    gpio_init(ROT_SW);
-    gpio_set_dir(ROT_SW, GPIO_IN);
-    gpio_pull_up(ROT_SW); //Encoder nappi, tarvitaan siihen pull-up
-
-
-
-    //(ISR) keskeytysfunktio, kun ROT_A havaitsee reunan suoritetaan gpio_handler funktio
-    gpio_set_irq_enabled_with_callback(
-        ROT_A,
-        GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
+    gpio_set_irq_enabled_with_callback(ROT_A,
+        GPIO_IRQ_EDGE_RISE,
         true,
-        &gpio_handler);
+        &gpio_interrupt
+        );
 
+    //(Asetetaan alkuarvo kirkkaudelle 50%):
+    int brightness = 500;
+    bool LEDS_ON = false; //muuttuja joka pitää huolen ovatko LEDit päällä
+    bool prev_button = true; //tämä tallentaa napin aiemman tilan
 
-    //Loop
+    //LOOP
     while (1) {
-        // --- Handle rotation ---
-        if (rotated) {
-            rotated = false;  // clear flag
+        bool current_button = gpio_get(ROT_SW);
 
-            if (leds_on) {
-                if (direction > 0 && brightness < MAX_BRIGHTNESS)
-                    brightness += 5;
-                else if (direction < 0 && brightness > MIN_BRIGHTNESS)
-                    brightness -= 5;
+        //Tarkistetaan painallus
+        if (!current_button && prev_button) {
+            sleep_ms(200); //"debounce"
 
-                pwm_set_chan_level(slice_num1, channel1, brightness);
-                pwm_set_chan_level(slice_num2, channel2, brightness);
-                pwm_set_chan_level(slice_num3, channel3, brightness);
-                printf("Brightness: %u\n", brightness);
+            //Jos kirkkaus 0 niin palautetaan 50%
+            if (LEDS_ON && brightness == 0) {
+                brightness = 500;
+            }
+
+            //Vaihdetaan LEDien tila päälle tai pois.
+            else {
+                LEDS_ON = !LEDS_ON;
+                if (LEDS_ON && brightness == 0) {
+                    brightness = 500;
+                }
             }
         }
 
-        // --- Handle push button (toggle on/off) ---
-        bool button_pressed = !gpio_get(ROT_SW);
+        //Tallentaa napin nykyisen tilan:
+        prev_button = current_button;
 
-        if (button_pressed && !prev_button) {
-            leds_on = !leds_on;
+        //Encoderin käsittely jonosta
+        int direction;
 
-            if (!leds_on) {
-                brightness = 0;
-            } else if (brightness == 0) {
-                brightness = 500; // restore to 50%
+        while (queue_try_remove(&rot_queue, &direction)) {
+            if (LEDS_ON) {
+                brightness += direction * 20; //+1 kirkkaampi, -1 himmeämpi
             }
 
-            pwm_set_chan_level(slice_num1, channel1, brightness);
-            pwm_set_chan_level(slice_num2, channel2, brightness);
-            pwm_set_chan_level(slice_num3, channel3, brightness);
+            if (brightness < 0) brightness = 0;
+            if (brightness > MAX_BRIGHTNESS) brightness = MAX_BRIGHTNESS;
         }
 
-        prev_button = button_pressed;
-        sleep_ms(10);
+        //Päivitetään LEDien tila:
+        if (LEDS_ON) {
+            pwm_set_gpio_level(LED_PIN1, brightness);
+            pwm_set_gpio_level(LED_PIN2, brightness);
+            pwm_set_gpio_level(LED_PIN3, brightness);
+        }
+        else {
+            pwm_set_gpio_level(LED_PIN1, 0);
+            pwm_set_gpio_level(LED_PIN2, 0);
+            pwm_set_gpio_level(LED_PIN3, 0);
+        }
+
+        sleep_ms(5);
+    }
+}
+
+//Keskeytysfunktio:
+void gpio_interrupt(uint gpio, uint32_t events) {
+    if (gpio == ROT_A) {
+        if (events & GPIO_IRQ_EDGE_RISE) {
+            int direction;
+
+            //Myötäpäivään:
+            if (gpio_get(ROT_B))
+                direction = 1;
+
+            //Vastapäivään:
+            else
+                direction = -1;
+
+            //Lisätään tapahtuma jonoon:
+            queue_try_add(&rot_queue, &direction);
+        }
     }
 }
