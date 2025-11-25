@@ -1,156 +1,117 @@
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
 #include "pico/stdlib.h"
-#include "hardware/pwm.h"
-#include "hardware/gpio.h"
-#include "pico/util/queue.h"
+#include "hardware/uart.h"
 
-//Maximi kirkkaus:
-#define MAX_BRIGHTNESS 1000
+#define UART_ID uart1
+#define UART_TX_PIN 4
+#define UART_RX_PIN 5
+#define BAUD_RATE 9600
 
-//LED pinnit:
-#define LED_PIN1 20
-#define LED_PIN2 21
-#define LED_PIN3 22
+#define BUTTON_PIN 9
+#define BUFLEN 128
 
-//Rotary encoder pinnit:
-#define ROT_A 10
-#define ROT_B 11
-#define ROT_SW 12
-
-
-//ISR laittaa muistiin käännökset:
-queue_t rot_queue;
-
-void gpio_interrupt(uint gpio, uint32_t events);
-
-int main() {
-
-    //"Rotary encoder" asetukset:
-    gpio_init(ROT_A);
-    gpio_set_dir(ROT_A, GPIO_IN);
-    gpio_disable_pulls(ROT_A);
-
-    gpio_init(ROT_B);
-    gpio_set_dir(ROT_B, GPIO_IN);
-    gpio_disable_pulls(ROT_B);
-
-
-    //NAPPI:
-    gpio_init(ROT_SW);
-    gpio_set_dir(ROT_SW, GPIO_IN);
-    gpio_pull_up(ROT_SW);
-
-
-    //LED-pinnit PWM-käyttöön:
-    gpio_set_function(LED_PIN1, GPIO_FUNC_PWM);
-    gpio_set_function(LED_PIN2, GPIO_FUNC_PWM);
-    gpio_set_function(LED_PIN3, GPIO_FUNC_PWM);
-
-
-    //"Slices":
-    uint slice1 = pwm_gpio_to_slice_num(LED_PIN1);
-    uint slice2 = pwm_gpio_to_slice_num(LED_PIN2);
-    uint slice3 = pwm_gpio_to_slice_num(LED_PIN3);
-
-
-    //Jaetaan 125 MHz 125:llä, josta tulee = 1 MHz:
-    pwm_set_clkdiv(slice1, 125.0f);
-    pwm_set_clkdiv(slice2, 125.0f);
-    pwm_set_clkdiv(slice3, 125.0f);
-
-    //1 kHz (0-999 arvot):
-    pwm_set_wrap(slice1, MAX_BRIGHTNESS - 1);
-    pwm_set_wrap(slice2, MAX_BRIGHTNESS - 1);
-    pwm_set_wrap(slice3, MAX_BRIGHTNESS - 1);
-
-    //Käynnistetään PWM:
-    pwm_set_enabled(slice1, true);
-    pwm_set_enabled(slice2, true);
-    pwm_set_enabled(slice3, true);
-
-
-    //Jonon alustus:
-    queue_init(&rot_queue, sizeof(int), 32);
-
-    gpio_set_irq_enabled_with_callback(ROT_A,
-        GPIO_IRQ_EDGE_RISE,
-        true,
-        &gpio_interrupt
-        );
-
-    //(Asetetaan alkuarvo kirkkaudelle 50%)
-    int brightness = 500;
-    bool LEDS_ON = false; //muuttuja joka pitää huolen ovatko LEDit päällä
-    bool prev_button = true; //tämä tallentaa napin aiemman tilan
-
-    //LOOP
-    while (1) {
-        bool current_button = gpio_get(ROT_SW);
-
-        //Tarkistetaan painallus
-        if (!current_button && prev_button) {
-            sleep_ms(200); //"debounce"
-
-            //Jos kirkkaus 0 niin palautetaan 50%
-            if (LEDS_ON && brightness == 0) {
-                brightness = 500;
-            }
-
-            //Vaihdetaan LEDien tila päälle tai pois.
-            else {
-                LEDS_ON = !LEDS_ON;
-                if (LEDS_ON && brightness == 0) {
-                    brightness = 500;
-                }
-            }
-        }
-
-        //Tallentaa napin nykyisen tilan:
-        prev_button = current_button;
-
-        //Encoderin käsittely jonosta
-        int direction;
-
-        while (queue_try_remove(&rot_queue, &direction)) {
-            if (LEDS_ON) {
-                brightness += direction * 20; // +1 kirkkaampi, -1 himmeämpi
-            }
-
-            if (brightness < 0) brightness = 0;
-            if (brightness > MAX_BRIGHTNESS) brightness = MAX_BRIGHTNESS;
-        }
-
-        //Päivitetään LEDien tila
-        if (LEDS_ON) {
-            pwm_set_gpio_level(LED_PIN1, brightness);
-            pwm_set_gpio_level(LED_PIN2, brightness);
-            pwm_set_gpio_level(LED_PIN3, brightness);
-        }
-        else {
-            pwm_set_gpio_level(LED_PIN1, 0);
-            pwm_set_gpio_level(LED_PIN2, 0);
-            pwm_set_gpio_level(LED_PIN3, 0);
-        }
-
-        sleep_ms(5);
-    }
+// Sends command and CRLF
+void send_cmd(const char *cmd) {
+    uart_puts(UART_ID, cmd);
+    uart_puts(UART_ID, "\r\n");
 }
 
-//Keskeytysfunktio
-void gpio_interrupt(uint gpio, uint32_t events) {
-    if (gpio == ROT_A) {
-        if (events & GPIO_IRQ_EDGE_RISE) {
-            int direction;
+// Reads one line from UART (simple student version)
+int read_line(char *buf, int maxlen) {
+    int i = 0;
+    absolute_time_t timeout = make_timeout_time_ms(500);
 
-            //Myötäpäivään:
-            if (gpio_get(ROT_B))
-                direction = 1;
+    while (absolute_time_diff_us(get_absolute_time(), timeout) > 0) {
+        if (uart_is_readable(UART_ID)) {
+            char c = uart_getc(UART_ID);
 
-            //Vastapäivään
-            else
-                direction = -1;
+            if (c == '\n') {
+                buf[i] = 0;
+                return i;
+            }
 
-            //lisätään tapahtuma jonoon
-            queue_try_add(&rot_queue, &direction);
+            if (i < maxlen - 1) {
+                buf[i++] = c;
+            }
+        }
+    }
+    buf[i] = 0;
+    return i;
+}
+
+// Remove colons and make lowercase
+void clean_eui(char *str) {
+    char tmp[64];
+    int j = 0;
+    for (int i = 0; str[i]; i++) {
+        if (str[i] != ':' && str[i] != ',' && str[i] != '\r')
+            tmp[j++] = tolower(str[i]);
+    }
+    tmp[j] = 0;
+    strcpy(str, tmp);
+}
+
+int main() {
+    stdio_init_all();
+    sleep_ms(1500);
+
+    gpio_init(BUTTON_PIN);
+    gpio_set_dir(BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_PIN);
+
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+    char buf[BUFLEN];
+
+    printf("LoRa UART ready. Press SW0.\n");
+
+    while (1) {
+        // Wait button press
+        if (!gpio_get(BUTTON_PIN)) {
+            while (!gpio_get(BUTTON_PIN)) {}
+            printf("\n--- LoRa Query ---\n");
+
+            //
+            // 1) Test AT
+            //
+            send_cmd("AT");
+            read_line(buf, BUFLEN);
+            printf("AT reply: %s\n", buf);
+
+            if (strstr(buf, "OK"))
+                printf("Connected to LoRa module\n");
+            else {
+                printf("LoRa not responding\n");
+                continue;
+            }
+
+            //
+            // 2) Firmware version
+            //
+            send_cmd("AT+VER=?");
+            read_line(buf, BUFLEN);
+            printf("Firmware version: %s\n", buf);
+
+            //
+            // 3) DevEUI
+            //
+            send_cmd("AT+ID=DevEui");
+            read_line(buf, BUFLEN);
+            printf("Raw DevEUI: %s\n", buf);
+
+            clean_eui(buf);
+            printf("DevEUI: %s\n", buf);
+
+            printf("--- Done ---\n");
+        }
+
+        // Print any unexpected messages from LoRa
+        while (uart_is_readable(UART_ID)) {
+            putchar(uart_getc(UART_ID));
         }
     }
 }
