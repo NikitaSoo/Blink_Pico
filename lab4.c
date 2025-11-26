@@ -22,7 +22,7 @@
 //Funktiot joita käytetään:
 bool read_line(char *buffer, int max, int timeout_ms);
 void send_cmd(const char *cmd);
-void format_eui(char *output, const char *input);
+bool format_eui(char *output, const char *input, int max_len);
 
 int main() {
     stdio_init_all();
@@ -91,22 +91,22 @@ int main() {
         printf("Yhteys saatu LORA:an!\n");
 
 
-
         //LUETAAN FIRMWARE
         send_cmd("AT+VER");
 
-        if (read_line(line, ROW_LEN,500)) {
-            printf("Firmware: %s\n", line);
+        if (!read_line(line, ROW_LEN, 500)) {
+            printf("Ei vastausta VER-komentoon.\n");
+            continue;
         }
-        else {
-            printf("Moduuli lopetti toimintansa.\n");
+        printf("Vastaanotetaan: %s\n", line);
+        if (strstr(line, "+VER") == NULL) {
+            printf("Virheellinen VER-vastaus.\n");
             continue;
         }
 
-        //Mahdollinen "OK"
+        printf("Firmware: %s\n", line);
+        //Mahdollinen OK
         read_line(line, ROW_LEN, 500);
-
-
 
 
         //DevEUI ja vielä muokataan se LoRaWAN-muotoon
@@ -119,18 +119,29 @@ int main() {
 
         printf("DevEui: %s\n", line);
 
-        //Etsitään pilkku, jonka jälkeen saadaan varsinainen EUI
-        char *COMMA = strchr(line, ',');
+        if (strncmp(line, "+ID:", 4) != 0 || strstr(line, "DevEui") == NULL) {
+            printf("Virheellinen DevEui-vastaus.\n");
+            continue;
+        }
 
-        if (COMMA) {
-            format_eui(cleaned,COMMA + 1 );
-            printf("Muokattu DevEui; %s\n\n", cleaned);
+        //Erotetaan heksadesimaali ja merkkijono
+        char *COMMA = strchr(line, ',');
+        if (!COMMA) {
+            printf("DevEui-vastauksessa ei ole pilkkua.\n");
+            continue;
+        }
+        char *hex_input = COMMA + 1;
+        while (*hex_input == ' ' || *hex_input == '\t') {
+            hex_input++;
+        }
+        if (format_eui(cleaned, hex_input, 16)) {
+            printf("Muokattu DevEui: %s\n\n", cleaned);
         }
         else {
-            printf("Ei saatu DevEui.\n\n");
+            printf("DevEui-ohjelmaa ei saatu.\n\n");
         }
 
-        //Mahdollinen "OK"
+        //Madollinen OK
         read_line(line,ROW_LEN,500);
     }
 
@@ -180,15 +191,21 @@ void send_cmd(const char *cmd) {
 
 
 //Muutetaan kirajaimet pieniksi ja poistetaan kaksoispisteet:
-void format_eui(char *output, const char *input) {
-    int i = 0;
+//poistetaan kaksoipisteet ja muutetaan kirjaimet pieniksi
+bool format_eui(char *output, const char *input, int max_len) {
     int j = 0;
-
-    for (i = 0; input[i]; i++) {
-
-        if (input[i] != ':') {
-            output[j++] = (char)tolower((unsigned char)input[i]);
+    for (int i = 0; input[i] != '\0'; i++) {
+        if (input[i] == ':') {
+            continue;
         }
-        output[j] = '\0';
+        if (!isxdigit(input[i])) {
+            return false;
+        }
+        if (j >= max_len) {
+            return false;
+        }
+        output[j++] = tolower(input[i]);
     }
+    output[j] = '\0';
+    return (j == max_len);
 }
