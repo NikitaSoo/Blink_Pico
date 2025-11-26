@@ -1,117 +1,194 @@
 #include <stdio.h>
 #include <string.h>
-#include <ctype.h>
 #include "pico/stdlib.h"
-#include "hardware/uart.h"
 
-#define UART_ID uart1
-#define UART_TX_PIN 4
-#define UART_RX_PIN 5
-#define BAUD_RATE 9600
+//Moottori pinnit:
+#define IN1 2
+#define IN2 3
+#define IN3 6
+#define IN4 13
 
-#define BUTTON_PIN 9
-#define BUFLEN 128
+//Optohaarukka:
+#define OPTO 28
 
-// Sends command and CRLF
-void send_cmd(const char *cmd) {
-    uart_puts(UART_ID, cmd);
-    uart_puts(UART_ID, "\r\n");
-}
 
-// Reads one line from UART (simple student version)
-int read_line(char *buf, int maxlen) {
-    int i = 0;
-    absolute_time_t timeout = make_timeout_time_ms(500);
+//Funktiot joita käytetään:
+void step_once();
+void falling_edge();
+int measure_one_rev();
+void calibrate();
+void run_motor(int N);
 
-    while (absolute_time_diff_us(get_absolute_time(), timeout) > 0) {
-        if (uart_is_readable(UART_ID)) {
-            char c = uart_getc(UART_ID);
 
-            if (c == '\n') {
-                buf[i] = 0;
-                return i;
-            }
+//Half-step sekvenssi (8 vaiheitta)
+int step_table[8][4] = {
+    {1,0,0,0}, //1
+    {1,1,0,0}, //2
+    {0,1,0,0}, //3
+    {0,1,1,0}, //4
+    {0,0,1,0}, //5
+    {0,0,1,1}, //6
+    {0,0,0,1}, //7
+    {1,0,0,1}, //8
+};
 
-            if (i < maxlen - 1) {
-                buf[i++] = c;
-            }
-        }
-    }
-    buf[i] = 0;
-    return i;
-}
-
-// Remove colons and make lowercase
-void clean_eui(char *str) {
-    char tmp[64];
-    int j = 0;
-    for (int i = 0; str[i]; i++) {
-        if (str[i] != ':' && str[i] != ',' && str[i] != '\r')
-            tmp[j++] = tolower(str[i]);
-    }
-    tmp[j] = 0;
-    strcpy(str, tmp);
-}
+int STEP_index = 0;
+int STEPS_rev = 0;
+int calibrated = 0;
 
 int main() {
     stdio_init_all();
-    sleep_ms(1500);
 
-    gpio_init(BUTTON_PIN);
-    gpio_set_dir(BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(BUTTON_PIN);
+    //Moottorin alustus:
+    gpio_init(IN1); gpio_set_dir(IN1, GPIO_OUT);
+    gpio_init(IN2); gpio_set_dir(IN2, GPIO_OUT);
+    gpio_init(IN3); gpio_set_dir(IN3, GPIO_OUT);
+    gpio_init(IN4); gpio_set_dir(IN4, GPIO_OUT);
 
-    uart_init(UART_ID, BAUD_RATE);
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+    //Optohaarukan alustus:
+    gpio_init(OPTO);
+    gpio_set_dir(OPTO, GPIO_IN);
+    gpio_pull_up(OPTO);
 
-    char buf[BUFLEN];
-
-    printf("LoRa UART ready. Press SW0.\n");
+    char cmd[32];
 
     while (1) {
-        // Wait button press
-        if (!gpio_get(BUTTON_PIN)) {
-            while (!gpio_get(BUTTON_PIN)) {}
-            printf("\n--- LoRa Query ---\n");
 
-            //
-            // 1) Test AT
-            //
-            send_cmd("AT");
-            read_line(buf, BUFLEN);
-            printf("AT reply: %s\n", buf);
+        //Luetaan komento USB-sarjaportista:
+        if (!fgets(cmd, sizeof(cmd),stdin)) {
+            continue;
+        }
 
-            if (strstr(buf, "OK"))
-                printf("Connected to LoRa module\n");
+        //"Status" komento:
+        if (strncmp(cmd, "status",6) == 0) {
+            if (calibrated == 1) {
+                printf("Kalibroitu: YES\n");
+                printf("Vaiheet per kierros: %d\n", STEPS_rev);
+            }
             else {
-                printf("LoRa not responding\n");
-                continue;
+                printf("Kalibroitu: NO\n");
+            }
+        }
+
+        //Calib-komento
+        else if (strncmp(cmd, "calib", 5) == 0) {
+            calibrate();
+        }
+
+        //RUN-komento:
+        else if (strncmp(cmd, "run", 3) == 0) {
+            int N;
+            if (sscanf(cmd, "run %d", &N) == 1) {
+
+                //suoritetaan "N" kertaa
+                run_motor(N);
+
             }
 
-            //
-            // 2) Firmware version
-            //
-            send_cmd("AT+VER=?");
-            read_line(buf, BUFLEN);
-            printf("Firmware version: %s\n", buf);
-
-            //
-            // 3) DevEUI
-            //
-            send_cmd("AT+ID=DevEui");
-            read_line(buf, BUFLEN);
-            printf("Raw DevEUI: %s\n", buf);
-
-            clean_eui(buf);
-            printf("DevEUI: %s\n", buf);
-
-            printf("--- Done ---\n");
+            //Suoritetaan yksi täysi kierros
+            else {
+                run_motor(-1);
+            }
         }
-
-        // Print any unexpected messages from LoRa
-        while (uart_is_readable(UART_ID)) {
-            putchar(uart_getc(UART_ID));
+        else {
+            printf("Virheellinen komento, komennot ovat: status | calib | run[N]\n");
         }
     }
+}
+
+//yksi vaihe myötäpäivään
+void step_once() {
+    STEP_index = (STEP_index + 1) % 8;
+    gpio_put(IN1, step_table[STEP_index][0]);
+    gpio_put(IN2, step_table[STEP_index][1]);
+    gpio_put(IN3, step_table[STEP_index][2]);
+    gpio_put(IN4, step_table[STEP_index][3]);
+
+    sleep_ms(3);
+}
+
+//odotetaan laskevaa reunaa
+void falling_edge() {
+    int prev = gpio_get(OPTO);
+
+    while (true) {
+        step_once();
+        int now = gpio_get(OPTO);
+        if (prev == 1 && now == 0) {
+            return;
+        }
+        prev = now;
+    }
+}
+
+//lasketaan vaiheiden määrä yhden kierroksen aikana
+int measure_one_rev() {
+    int prev = gpio_get(OPTO);
+    int count = 0;
+
+    while (true) {
+        step_once();
+        count++;
+        int now = gpio_get(OPTO);
+        if (prev == 1 && now == 0) {
+            return count;
+        }
+        prev = now;
+    }
+}
+
+//kalibrointi:
+void calibrate() {
+    printf("Kalibroidaan..\n");
+
+    //Etsitään laskeva reuna:
+    falling_edge();
+
+    //Kolme kierrosta:
+    int FIRST = measure_one_rev();
+    int SECOND = measure_one_rev();
+    int THIRD = measure_one_rev();
+
+    STEPS_rev = (FIRST + SECOND + THIRD) / 3;
+    calibrated = 1;
+
+    printf("Kalibrointi suoritettu. Vaiheet per kierros = %d\n", STEPS_rev);
+}
+
+//(N / 8 kierrosta) tai yhden täyden kierroksen, jos N = -1:
+void run_motor (int N) {
+
+    int SPR;
+
+    //Käytetään mitattua vaiheiden määrää:
+    if (calibrated == 1) {
+        SPR = STEPS_rev;
+    }
+
+    //Oletusarvo 4096:
+    else {
+        SPR = 4096;
+    }
+
+    //Lasketaan ajettavien askelten määrä:
+    int steps;
+
+    if (N == -1) {
+        steps = SPR;
+    }
+    else {
+        if (N % 8 == 0) {
+            steps = SPR;
+        }
+        else {
+            steps = (SPR / 8) * (N % 8);
+        }
+    }
+
+    //Suoritetaan:
+    for (int i = 0; i < steps; i++) {
+        step_once();
+    }
+
+    printf("Suoritettu!\n");
 }
