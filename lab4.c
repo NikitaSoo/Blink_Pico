@@ -191,7 +191,6 @@ void send_cmd(const char *cmd) {
 
 
 //Muutetaan kirajaimet pieniksi ja poistetaan kaksoispisteet:
-//poistetaan kaksoipisteet ja muutetaan kirjaimet pieniksi
 bool format_eui(char *output, const char *input, int max_len) {
     int j = 0;
     for (int i = 0; input[i] != '\0'; i++) {
